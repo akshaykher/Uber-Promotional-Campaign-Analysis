@@ -1,0 +1,1279 @@
+---
+title: "Uber Promotional Campaign Analysis"
+author: "Akshay Kher"
+date: "`r format(Sys.time(), '%d %B, %Y')`"
+output:
+   html_document:
+    code_folding: hide
+---
+
+# {.tabset .tabset-fade}
+
+## Introduction
+
+```{r, out.width = "300px", , fig.align="center"}
+path_image <- "C:/Users/Akshay Kher/Desktop/Uber/Data Challenge Related/Akshay Kher - Uber Data Challenge/documents/"
+knitr::include_graphics(paste0(path_image,'uber_logo.jpg'))
+```
+
+***
+
+#### **Problem Description**
+
+Uber has just started offering promotions to riders in city X. The goal of the promotional campaign is to encourage more trips among the riders and increase engagement. Now, the city team wants to make use of data to analyze the campaign's net benefit, including it's financial effectiveness. This will help them to run more data-driven promotional campaigns in the future, which should result in increased financial benefits.
+
+***
+
+#### **Steps**
+
+1. Data Preparation
+2. Data Analysis
+    (a) Data Exploration
+    (b) A/B Testing
+3. Summary & Recommendations
+4. Future Work
+
+## 1. Data Preparation
+
+**Libraries Required**
+```{r warning=FALSE, message=FALSE}
+library(readxl) # package to read excel files
+library(tidyverse) # package to perform data manipulation
+library(lubridate) # package to work with date objects
+library(kableExtra) # package to output HTML tables
+library(DT) # package to output HTML tables
+library(ggthemes) # package to change visualization themes
+library(FNN) # package to run K-Nearest Neighbour Algorithm
+```
+
+***
+
+**Reading Data**
+```{r}
+path <- "C:/Users/Akshay Kher/Desktop/Uber/Data Challenge Related/Akshay Kher - Uber Data Challenge/data/" # data path
+
+driver_rider_trips <- read_excel(paste0(path,"data_set_170705.xlsx"), sheet = "driver_trips") # historical trips for drivers
+rider_trips <- read_excel(paste0(path,"data_set_170705.xlsx"), sheet = "rider_trips") # historical trips for riders
+driver_data <- read_excel(paste0(path,"data_set_170705.xlsx"), sheet = "driver_data") # historical info about drivers
+rider_data <- read_excel(paste0(path,"data_set_170705.xlsx"), sheet = "rider_data") # historical info about riders
+city_metrics <- read_excel(paste0(path,"data_set_170705.xlsx"), sheet = "city_metrics") # historical info about city
+```
+
+***
+
+**Cleaning Data**
+
+#### (I) *Driver Trips (**59854 X 9**)* | *Rider Trips (**60000 X 10**)*
+
+***
+
+**Aggregating Driver and Rider Trips data (59999 X 13)**:
+
+* **Driver Trips** table has been outer joined with **Rider Trips** table
+* Trip ID: **94a1-82d8** has 2 values. The one corresponding to trip status: **unfulfilled** has been removed.
+* **driver payout** has been renamed to **driver_payout**
+
+```{r}
+# remove duplicate trip id
+remove_index_driver <- which(driver_rider_trips$trip_id == '94a1-82d8' & driver_rider_trips$trip_status == 'unfulfilled')
+remove_index_rider <- which(rider_trips$trip_id == '94a1-82d8' & rider_trips$trip_status == 'unfulfilled')
+driver_rider_trips <- driver_rider_trips[-remove_index_driver,]
+rider_trips <- rider_trips[-remove_index_rider,]
+
+# Joining driver and rider trip data
+driver_rider_trips <- 
+  driver_rider_trips %>% 
+    full_join(select(rider_trips, trip_id, rider_id, estimated_time_to_arrival, 
+                     trip_price_pre_discount, rider_payment), by='trip_id') %>% 
+  select(trip_id, driver_id, rider_id, trip_status, request_time, estimated_time_to_arrival, actual_time_to_arrival,
+         surge_multiplier, driver_payout = `driver payout` , trip_price_pre_discount, rider_payment, start_geo, end_geo)
+```
+
+
+***
+
+**Data Dictionary**
+```{r message = FALSE, warning = FALSE}
+text_tbl <- data.frame (
+  Variable = names(driver_rider_trips),
+  Description = c(
+    "Unique identifier for trip",
+    "Unique identifier for driver",
+    "Unique identifier for rider",
+    "Status of the trip", 
+    "Local request time of the trip",
+    "Minutes estimated at time of request to pick-up time",
+    "Minutes from request to pick-up",
+    "The surge multiplier on the regular price of the trip (base fare + time charge + distance charge)",
+    "The amount the driver was paid for the trip",
+    "The original price of the trip",
+    "The amount the rider paid for the trip (includes the discount, which Uber covers)",
+    "The geo of the request point of the trip",
+    "The geo of the dropoff point of the trip"
+  )
+)
+
+kable(text_tbl) %>%
+  kable_styling(full_width = F) %>%
+  column_spec(1, bold = T, border_right = T) %>%
+  column_spec(2, width = "30em")
+```
+
+***
+
+**First 100 rows**
+```{r}
+kable(head(driver_rider_trips, 100)) %>% 
+  kable_styling(bootstrap_options = c("striped", "hover", "responsive")) %>% 
+  scroll_box(width = "100%", height = "500px")
+```
+
+***
+
+**Converting data types:**
+
+* Trip status to factor
+* Request time to date format
+* Start location as factor
+* End location as factor
+
+```{r}
+driver_rider_trips$trip_status <- as.factor(driver_rider_trips$trip_status) # converting to factor
+driver_rider_trips$request_time <- ymd_hms(driver_rider_trips$request_time) # converting to date
+driver_rider_trips$start_geo <- as.factor(driver_rider_trips$start_geo) # converting to factor
+driver_rider_trips$end_geo <- as.factor(driver_rider_trips$end_geo) # converting to factor
+
+glimpse(driver_rider_trips)
+```
+
+***
+
+**Missing Values**
+
+```{r warning=FALSE, message=FALSE}
+# calculate missing values
+na_table <-
+  map_dbl(driver_rider_trips, function(x) sum(is.na(x))) %>% 
+  sort(decreasing = TRUE) %>% 
+  data.frame()
+
+# rename column
+colnames(na_table) <- c("total_missing")
+
+# display missing value table
+kable(na_table) %>% 
+  kable_styling(bootstrap_options = c("striped", "hover", "responsive"), full_width = F, position='left')
+```
+
+***
+
+There are **146 Trip IDs** that do not have a corresponding driver assigned. All of these 146 trips were cancelled by the rider. It seems like the trips were cancelled before a driver could be assigned. After removing these 146 Trip IDs the missing value table looks like this:
+
+```{r}
+# Removing Trip IDs with no driver assigned
+driver_rider_trips <-
+  filter(driver_rider_trips, !is.na(driver_id))
+
+# calculate missing values
+na_table <-
+  map_dbl(driver_rider_trips, function(x) sum(is.na(x))) %>% 
+  sort(decreasing = TRUE) %>% 
+  data.frame()
+
+# rename column
+colnames(na_table) <- c("total_missing")
+
+# display missing value table
+kable(na_table) %>% 
+  kable_styling(bootstrap_options = c("striped", "hover", "responsive"), full_width = F, position='left')
+```
+
+***
+
+Only **actual time to arrival** and **estimated time to arrival** columns has missing values.
+
+Note: Out of 6270 missing values for **actual time to arrival**:
+
+* 3800: rider cancelled trips
+* **2407: completed trips**
+* 35: unfulfilled trips
+* 29: failed trips
+
+Completed trips should have non-missing values i.e. **2407** trips. Other trips should have missing values.
+
+Note: Out of 2354 missing values for **estimated time to arrival**:
+
+* **81: rider cancelled trips**
+* **2210: completed trips**
+* 34: unfulfilled trips
+* **29: failed trips**
+
+Trips which are unfulfilled should have missing values. Other trips can have non-missing values i.e. **2325** trips. The updated missing value table looks like:
+```{r warning=FALSE, message=FALSE}
+# calculate missing values
+na_table <-
+  map_dbl(filter(driver_rider_trips, trip_status == 'completed'), function(x) sum(is.na(x))) %>% 
+  sort(decreasing = TRUE) %>% 
+  data.frame()
+
+# rename column
+colnames(na_table) <- c("total_missing")
+
+na_table$total_missing[2] <- 2325
+
+# display missing value table
+kable(na_table) %>% 
+  kable_styling(bootstrap_options = c("striped", "hover", "responsive"), full_width = F, position='left')
+```
+
+***
+
+**Imputing Missing Values**
+
+After replacing the missing **actual time to arrival** values with **estimated time to arrival**, the missing value table looks like this:
+```{r}
+# replacing the missing actual time to arrival values with estimated time to arrival
+driver_rider_trips$actual_time_to_arrival <- 
+ifelse(is.na(driver_rider_trips$actual_time_to_arrival) & driver_rider_trips$trip_status == "completed", 
+       driver_rider_trips$estimated_time_to_arrival, driver_rider_trips$actual_time_to_arrival)
+
+# calculate missing values
+na_table <-
+  map_dbl(filter(driver_rider_trips, trip_status == 'completed'), function(x) sum(is.na(x))) %>% 
+  sort(decreasing = TRUE) %>% 
+  data.frame()
+
+# rename column
+colnames(na_table) <- c("total_missing")
+
+na_table$total_missing[2] <- 2325
+
+# display missing value table
+kable(na_table) %>% 
+  kable_styling(bootstrap_options = c("striped", "hover", "responsive"), full_width = F, position='left')
+
+```
+
+***
+
+**To fill the remaining 2210 actual time to arrival values and 2325 estimated time to arrival values**, I have incorporated the following approach:
+
+* Calculated the **median actual time/estimated time to arrival values** at each hour for all start locations
+* **Replaced the missing actual time/estimated time to arrival values by the median value** for that particular hour and start location respectively
+
+Using the above logic we are able to fill all the valuess. 
+```{r}
+
+# df1 contains all the median actual time to arrival by hour and start location for all completed driver trips 
+df1 <-
+  driver_rider_trips %>% 
+  filter(trip_status == "completed") %>%
+  group_by(start_geo,  hour(request_time)) %>% 
+  summarize(median_actual_time_to_arrival = median(actual_time_to_arrival, na.rm = TRUE)) %>% 
+  select(start_geo, hour = `hour(request_time)`, median_actual_time_to_arrival)
+
+# Repalacing missing ATA values with the median values for that particular hour and start location, for all completed trips
+driver_rider_trips <-
+  mutate(driver_rider_trips, hour = hour(request_time)) %>%
+  left_join(df1, by= c('start_geo'='start_geo', 'hour'='hour')) %>% 
+  mutate(actual_time_to_arrival = ifelse(is.na(actual_time_to_arrival)
+                                         , median_actual_time_to_arrival
+                                         , actual_time_to_arrival)) %>% 
+  select(everything(), -median_actual_time_to_arrival, -hour)
+
+# df2 contains all the median estimated time to arrival by hour and start location
+df2 <-
+  driver_rider_trips %>% 
+  group_by(start_geo,  hour(request_time)) %>% 
+  summarize(median_estimated_time_to_arrival = median(estimated_time_to_arrival, na.rm = TRUE)) %>% 
+  select(start_geo, hour = `hour(request_time)`, median_estimated_time_to_arrival)
+
+# Repalacing missing estimated time to arrival values with the median values for that particular hour and start location
+driver_rider_trips <-
+  mutate(driver_rider_trips, hour = hour(request_time)) %>%
+  left_join(df2, by= c('start_geo'='start_geo', 'hour'='hour')) %>% 
+  mutate(estimated_time_to_arrival = ifelse(is.na(estimated_time_to_arrival)
+                                            , median_estimated_time_to_arrival
+                                            , estimated_time_to_arrival)) %>% 
+  select(everything(), -median_estimated_time_to_arrival, -hour)
+
+# Unfulfilled trips should have missing estimated time to arrival values
+driver_rider_trips$estimated_time_to_arrival <- 
+ifelse(driver_rider_trips$trip_status == "unfulfilled", NA, driver_rider_trips$estimated_time_to_arrival)
+
+```
+
+***
+
+**Final missing values table**
+```{r}
+# calculate missing values
+na_table <-
+  map_dbl(filter(driver_rider_trips, trip_status == 'completed'), function(x) sum(is.na(x))) %>% 
+  sort(decreasing = TRUE) %>% 
+  data.frame()
+
+# rename column
+colnames(na_table) <- c("total_missing")
+
+# display missing value table
+kable(na_table) %>% 
+  kable_styling(bootstrap_options = c("striped", "hover", "responsive"), full_width = F, position='left')
+```
+
+***
+
+**Outlier Analysis**
+
+Observations from the summary table:
+
+* **Estimated time to arrival** ranges between 0.02 - 33.77 minutes. However, 99% values lie below 9.5 minutes.
+* **Actual time to arrival** ranges between 0.02 - 35.68 minutes. However, 99% values lie below 10.88 minutes. 
+* **Surge multiplier** ranges between 1 - 4.8. The mean surge price is 1.16.
+* **Driver Payout** ranges between $0 - $175.87. However, 99% values lie below $24.24. There are **5 completed trips with $0 driver payout** which have been removed.
+* **Trip price per discount** ranges between $0 - $219.83. However, 99% values lie below $30.30.
+* **Rider payment** ranges between $0 - $219.83. However, 99% values lie below $30.27.  There are **5 completed trips with $0 rider payment** which have been removed.
+* Note: Added a new column **Actual Minus Estimated Time** which is the difference between actual and estimated time of arrivals. It ranges between 50.95 minutes early to 65.77 minutes late. I have removed all values having an absolute value of over 30 minutes.
+
+All variables seem to be heavily right skewed and top 1% values might be outliers. However, a throrough analysis needs to be done before removing any of the top 1% values. 
+
+```{r}
+# Difference between the actual and estimated time of arrival
+driver_rider_trips$actual_minus_estimated_time <- driver_rider_trips$actual_time_to_arrival - driver_rider_trips$estimated_time_to_arrival
+
+# removing all difference values having an absolute value of over 30 minutes.
+driver_rider_trips <- filter(driver_rider_trips, abs(actual_minus_estimated_time) <=30 | is.na(actual_minus_estimated_time))
+
+index1 <- 6 # from column
+index2 <- 11 # to column
+
+# summary statistics for numerical variables
+summary <- data.frame()
+for(i in c(index1:index2, 14))
+{
+  name = colnames(driver_rider_trips)[i]
+  min = min(driver_rider_trips[,i], na.rm=TRUE) %>% round(2)
+  percentile_1st = quantile(driver_rider_trips[,i,drop=TRUE], probs = 0.01, na.rm = TRUE) %>% round(2) %>% as.numeric()
+  mean = mean(driver_rider_trips[,i,drop=TRUE], na.rm=TRUE) %>% round(2)
+  median = median(driver_rider_trips[,i,drop=TRUE], na.rm=TRUE) %>% round(2)
+  percentile_99th = quantile(driver_rider_trips[,i,drop=TRUE], probs = 0.99, na.rm = TRUE) %>% round(2) %>% as.numeric()
+  max = max(driver_rider_trips[,i], na.rm=TRUE) %>% round(2)
+  count = sum(!is.na(driver_rider_trips[,i]))
+  df = data.frame(name, min, percentile_1st, mean=mean, median=median, percentile_99th, max, count)
+  summary <- rbind(summary, df)
+}
+
+# printing data
+kable(summary) %>% 
+  kable_styling(bootstrap_options = c("striped", "hover", "responsive"), full_width = F, position='left')
+```
+
+***
+
+#### (II) *Driver Data (**20202 X 5**)*
+
+***
+
+**Data Dictionary**
+```{r echo = FALSE, message = FALSE, warning = FALSE}
+text_tbl <- data.frame (
+  Variable = names(driver_data),
+  Description = c(
+    "Unique identifier for driver",
+    "Timestamp of the driver's first completed trip",
+    "Lifetime rating of driver", 
+    "Lifetime payout to driver",
+    "Lifetime completed trips of driver"
+  )
+)
+
+kable(text_tbl) %>%
+  kable_styling(full_width = F) %>%
+  column_spec(1, bold = T, border_right = T) %>%
+  column_spec(2, width = "30em")
+```
+
+***
+
+**First 100 rows**
+```{r }
+kable(head(driver_data, 100)) %>% 
+  kable_styling(bootstrap_options = c("striped", "hover", "responsive")) %>% 
+  scroll_box(width = "100%", height = "500px")
+```
+
+***
+
+**Missing Values**
+
+```{r warning=FALSE, message=FALSE}
+# calculate missing values
+na_table <-
+  map_dbl(driver_data, function(x) sum(is.na(x))) %>% 
+  sort(decreasing = TRUE) %>% 
+  data.frame()
+
+# rename column
+colnames(na_table) <- c("total_missing")
+
+# display missing value table
+kable(na_table) %>% 
+  kable_styling(bootstrap_options = c("striped", "hover", "responsive"), full_width = F, position='left')
+```
+
+***
+
+**Imputing Missing Values**
+
+99% of the drivers have a lifetime rating between 4.38 to 5. Hence, it is reasonable to fill in the missing values using the median value i.e. 4.79. The missing value table after the imputation looks like:
+
+```{r}
+# filling the missing lifetime rating with the median value
+driver_data$lifetime_rating <- 
+  ifelse(is.na(driver_data$lifetime_rating), median(driver_data$lifetime_rating, na.rm=TRUE) , 
+        driver_data$lifetime_rating)
+
+# calculate missing values
+na_table <-
+  map_dbl(driver_data, function(x) sum(is.na(x))) %>% 
+  sort(decreasing = TRUE) %>% 
+  data.frame()
+
+# rename column
+colnames(na_table) <- c("total_missing")
+
+# display missing value table
+kable(na_table) %>% 
+  kable_styling(bootstrap_options = c("striped", "hover", "responsive"), full_width = F, position='left')
+```
+
+***
+
+**Outlier Analysis**
+
+* There is a duplicate value for driver id: **4a3c-ac69**. The duplicate value has been removed.
+* Driver id: **4e79-a40f** has had $805410479 of lifetime fares and 41940330 completed trips. This is clearly an erroneous value which has been removed. 
+* Note: Added a new column **lifetime_fare_per_trip** which is the lifetime average fare per trip for the drivers.
+
+```{r}
+# removing duplicate driver id
+remove_index <- which(driver_data$driver_id == '4a3c-ac69' & year(driver_data$first_completed_trip) == 2012)
+driver_data <- driver_data[-remove_index,]
+
+# removing outlier driver id
+remove_index <- which(driver_data$driver_id == '4e79-a40f')
+driver_data <- driver_data[-remove_index,]
+
+# calculating lifetime fare per trip
+driver_data$lifetime_fare_per_trip <- driver_data$lifetime_fares/driver_data$lifetime_completed_trips
+```
+
+***
+
+**Observations from the summary table**:
+
+* **lifetime rating** of the drivers ranges between 2 - 5. However, only 1% of the ratings lie below 4.39. We might want to investigate drivers that have ratings lower than 4.
+* **lifetime fares** of the driver ranges between $8.78 - $579564.45. 
+* **lifetime completed trips** of the driver ranges between 1 - 24701. However, 99% of the driver have trips lower than 13501. 
+* **life fare per trip** ranges from $5.10 - $64.78. This value highly depends upon the number of trips undertaken by the drivers.
+
+All variables seem to be heavily right skewed and top 1% values might be outliers. However, a throrough analysis needs to be done before removing any of the top 1% values.
+```{r}
+index1 <- 3 # from column
+index2 <- 6 # to column
+
+# summary statistics for numerical variables
+summary <- data.frame() 
+for(i in index1:index2)
+{
+  name = colnames(driver_data)[i]
+  min = min(driver_data[,i], na.rm=TRUE) %>% round(2)
+  percentile_1st = quantile(driver_data[,i,drop=TRUE], probs = 0.01, na.rm = TRUE) %>% round(2) %>% as.numeric()
+  mean = mean(driver_data[,i,drop=TRUE], na.rm=TRUE) %>% round(2)
+  median = median(driver_data[,i,drop=TRUE], na.rm=TRUE) %>% round(2)
+  percentile_99th = quantile(driver_data[,i,drop=TRUE], probs = 0.99, na.rm = TRUE) %>% round(2) %>% as.numeric()
+  max = max(driver_data[,i], na.rm=TRUE) %>% round(2)
+  count = sum(!is.na(driver_data[,i]))
+  df = data.frame(name, min, percentile_1st, mean=mean, median=median, percentile_99th, max, count)
+  summary <- rbind(summary, df)
+}
+
+
+kable(summary) %>% 
+  kable_styling(bootstrap_options = c("striped", "hover", "responsive"), full_width = F, position='left')
+```
+
+
+***
+
+#### (III) *Rider Data (**50436 X 5**)*
+
+***
+
+**Data Dictionary**
+```{r echo = FALSE, message = FALSE, warning = FALSE}
+text_tbl <- data.frame (
+  Variable = names(rider_data),
+  Description = c(
+    "Unique identifier for rider",
+    "Timestamp of the rider's first completed trip",
+    "Lifetime completed trips of rider", 
+    "The city ID of the rider's first trip",
+    "Lifetime payments of rider"
+  )
+)
+
+kable(text_tbl) %>%
+  kable_styling(full_width = F) %>%
+  column_spec(1, bold = T, border_right = T) %>%
+  column_spec(2, width = "30em")
+```
+
+***
+
+**First 100 rows**
+```{r }
+kable(head(rider_data, 100)) %>% 
+  kable_styling(bootstrap_options = c("striped", "hover", "responsive")) %>% 
+  scroll_box(width = "100%", height = "500px")
+```
+
+***
+
+
+**Missing Values**
+
+```{r warning=FALSE, message=FALSE}
+# calculate missing values
+na_table <-
+  map_dbl(rider_data, function(x) sum(is.na(x))) %>% 
+  sort(decreasing = TRUE) %>% 
+  data.frame()
+
+# rename column
+colnames(na_table) <- c("total_missing")
+
+# display missing value table
+kable(na_table) %>% 
+  kable_styling(bootstrap_options = c("striped", "hover", "responsive"), full_width = F, position='left')
+```
+
+***
+
+**Imputing/Removing Missing Values**
+
+* There are **6 rider IDs** that have missing lifetime trips and lifetime payments. These rider IDs have been removed.
+* There are **93 rider IDs** that have missing first completed trip date. There is not enough data to confidently impute these values, hence I will leave them as missing.
+
+The final missing value table looks like:
+
+```{r}
+# removing rider data with missing lifetime trips value
+rider_data <- filter(rider_data, !is.na(lifetime_trips))
+
+# calculate missing values
+na_table <-
+  map_dbl(rider_data, function(x) sum(is.na(x))) %>% 
+  sort(decreasing = TRUE) %>% 
+  data.frame()
+
+# rename column
+colnames(na_table) <- c("total_missing")
+
+# display missing value table
+kable(na_table) %>% 
+  kable_styling(bootstrap_options = c("striped", "hover", "responsive"), full_width = F, position='left')
+```
+
+***
+
+**Outlier Analysis**
+
+Observations from the summary table:
+
+* **lifetime trips** of the rider ranges between 1 - 16141. However, only 1% of the trips lie above 1358. Also, 25% of the riders have just 1 trip. 
+* **lifetime payments** of the riders ranges between $0 - $139337.62. However, only 1% of the lifetime payments lie above $17281.77. Also, 25% of the riders have earned less than $20.
+* Note: Added a new column **lifetime_payment_per_trip** which is the lifetime average payment per trip for the riders. **lifetime payment per trip** of the riders ranges between $0 - $136.61. This value highly depends upon the number of trips undertaken by the riders
+
+All variables seem to be heavily right skewed and top 1% values might be outliers. However, a throrough analysis needs to be done before removing any of the top 1% values.
+
+```{r}
+# adding variable lifetime payment per trip
+rider_data$lifetime_payment_per_trip <- rider_data$lifetime_payments/rider_data$lifetime_trips
+
+# summary statistics for numerical variables
+summary <- data.frame()
+for(i in c(3,5,6))
+{
+  name = colnames(rider_data)[i]
+  min = min(rider_data[,i], na.rm=TRUE) %>% round(2)
+  percentile_1st = quantile(rider_data[,i,drop=TRUE], probs = 0.01, na.rm = TRUE) %>% round(2) %>% as.numeric()
+  mean = mean(rider_data[,i,drop=TRUE], na.rm=TRUE) %>% round(2)
+  median = median(rider_data[,i,drop=TRUE], na.rm=TRUE) %>% round(2)
+  percentile_99th = quantile(rider_data[,i,drop=TRUE], probs = 0.99, na.rm = TRUE) %>% round(2) %>% as.numeric()
+  max = max(rider_data[,i], na.rm=TRUE) %>% round(2)
+  count = sum(!is.na(rider_data[,i]))
+  df = data.frame(name, min, percentile_1st, mean=mean, median=median, percentile_99th, max, count)
+  summary <- rbind(summary, df)
+}
+
+
+kable(summary) %>% 
+  kable_styling(bootstrap_options = c("striped", "hover", "responsive"), full_width = F, position='left')
+```
+
+
+***
+
+#### (IV) *City Metrics (**672 X 5**)*
+
+***
+
+**Data Dictionary**
+```{r echo = FALSE, message = FALSE, warning = FALSE}
+text_tbl <- data.frame (
+  Variable = names(city_metrics),
+  Description = c(
+    "Day and hour of data",
+    "Total requests in the given hour",
+    "Total completed trips in the given hour", 
+    "Total hours all partners were online, en route, or on trip in the given hour",
+    "Mean surge multiplier of completed trips in that hour"
+  )
+)
+
+kable(text_tbl) %>%
+  kable_styling(full_width = F) %>%
+  column_spec(1, bold = T, border_right = T) %>%
+  column_spec(2, width = "30em")
+```
+
+***
+
+**All 672 rows**
+```{r }
+kable(head(city_metrics, 100)) %>% 
+  kable_styling(bootstrap_options = c("striped", "hover", "responsive")) %>% 
+  scroll_box(width = "100%", height = "500px")
+```
+
+
+***
+
+
+**Missing Values**
+
+```{r warning=FALSE, message=FALSE}
+# calculate missing values
+na_table <-
+  map_dbl(city_metrics, function(x) sum(is.na(x))) %>% 
+  sort(decreasing = TRUE) %>% 
+  data.frame()
+
+# rename column
+colnames(na_table) <- c("total_missing")
+
+# display missing value table
+kable(na_table) %>% 
+  kable_styling(bootstrap_options = c("striped", "hover", "responsive"), full_width = F, position='left')
+```
+
+***
+
+**Outlier Analysis**
+
+There seems to be no outlier values in this data set.
+```{r}
+# summary statistics for numerical variables
+summary <- data.frame()
+for(i in 2:5)
+{
+  name = colnames(city_metrics)[i]
+  min = min(city_metrics[,i], na.rm=TRUE) %>% round(2)
+  percentile_1st = quantile(city_metrics[,i,drop=TRUE], probs = 0.01, na.rm = TRUE) %>% round(2) %>% as.numeric()
+  mean = mean(city_metrics[,i,drop=TRUE], na.rm=TRUE) %>% round(2)
+  median = median(city_metrics[,i,drop=TRUE], na.rm=TRUE) %>% round(2)
+  percentile_99th = quantile(city_metrics[,i,drop=TRUE], probs = 0.99, na.rm = TRUE) %>% round(2) %>% as.numeric()
+  max = max(city_metrics[,i], na.rm=TRUE) %>% round(2)
+  count = sum(!is.na(city_metrics[,i]))
+  df = data.frame(name, min, percentile_1st, mean=mean, median=median, percentile_99th, max, count)
+  summary <- rbind(summary, df)
+}
+
+
+kable(summary) %>% 
+  kable_styling(bootstrap_options = c("striped", "hover", "responsive"), full_width = F, position='left')
+```
+
+## 2. Data Analysis {.tabset .tabset-fade .tabset-pills}
+
+### Data Exploration
+
+#### Overall
+
+For the given data there are:
+
+* **59,805 trips**
+* **20,200 unique drivers**
+* **50,430 unique riders**
+
+***
+
+#### Trip Status
+
+Out of a total of **59,805 trips**:
+
+* **90.45%** trips are **completed**
+* **9.40%** trips are **rider cancelled**. We shall dig deeper into the reasons behind ride cancellation.
+* **Less than 1%** of the rides either **fail or are unfulfilled**. This indicates smooth functioning of the Uber App.
+
+```{r}
+# reordering factor levels
+df <- driver_rider_trips
+df$trip_status = factor(df$trip_status,levels = c("completed", "rider_canceled", "failed", "unfulfilled"))
+
+# plotting visual
+ggplot(data = df, aes(x = trip_status)) +
+  geom_bar(fill = "#E69F00") +
+  theme_tufte() +
+  theme(axis.title.x=element_blank(),
+        axis.title.y=element_blank())
+```
+
+***
+
+#### Trip Distribution by day and hour
+
+* **Saturday** experiences highest trips whereas **Monday** experiences the least.
+* **17:00 - 22:00** seems to be the rush period.
+* There is **virtually no demand from 1am - 6am on Weekdays and 4am - 7am on Weekends**.
+* **7-9 on Weekdays**, there seems to be a higher demand as compared to the same time period on **Weekends**. This seems logical as people would leave for work in the morning on weekdays and wake up late on weekends.
+* **Friday and Saturday** late evenings experience extremely high demand. Probably people like to party late night on Friday and Saturday.
+* **An interesting observation: Sunday** constantly experiences a low demand throughout the day except from **12 - 1 am**. 
+
+```{r}
+# reordering factor levels and plotting visual
+city_metrics %>% 
+  mutate(hour = as.factor(hour(timestamp)), 
+         day = factor(as.factor(weekdays(city_metrics$timestamp)), 
+               levels = c("Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"))) %>% 
+  group_by(hour, day) %>% 
+  summarise(mean_trips = mean(trips)) %>% 
+  ggplot(aes(day, hour)) + 
+  geom_tile(aes(fill = mean_trips),colour = "white") + 
+  scale_fill_gradient(low = "white",high = "red") +
+  theme_tufte() +
+  theme(axis.title.x=element_blank(),
+        axis.title.y=element_blank()) +
+  labs(fill="Avg Trips")
+```
+
+***
+
+#### Trip Distribution by Geography
+
+* **Chelsea Court** experiences highest demand followed by **Allen Abby**
+* **Blair Bend** and **Daisy Drive** experience equally low demand.
+
+```{r}
+# reordering factor levels and plotting visual
+df <- driver_rider_trips
+df$start_geo = factor(df$start_geo,levels = c("Chelsea Court", "Allen Abby", "Daisy Drive", "Blair Bend"))
+ggplot(df, aes(x=start_geo)) +
+  geom_bar(fill = "#E69F00") +
+  theme_tufte() +
+  theme(axis.title.x=element_blank(),
+        axis.title.y=element_blank()) +
+  labs(fill="Avg Trips")
+```
+
+***
+
+#### Trip Distribution Week on Week
+
+* The date for week's are defined as follows:
+    * **Week 1**: 2012-04-09 - 2012-04-15
+    * **Week 2**: 2012-04-16 - 2012-04-22
+    * **Week 3**: 2012-04-23 - 2012-04-29
+    * **Week 4**: 2012-04-30 - 2012-05-06
+* **Saturday** experiences highest trips whereas **Monday** experiences the least. This point was evident in the heat map (trip distribution by day and hour) as well.
+* Demand on **Saturday's > Friday's > Thursday's > Wednesday's > Tuesday's > Monday's** week on week.
+* Week 3 has the highest trip demand whereas Week 2 has the lowest. Also, the trip distribution seems to fluctuate week on week. It would be interesting to dig deeper into the exact reason, provided we have more data.
+
+```{r}
+# plotting visual
+city_metrics %>% 
+  mutate(date = date(timestamp)) %>% 
+  group_by(date) %>% 
+  summarise(count = sum(trips)) %>% 
+  mutate(week = as.factor(c(rep(1,7), rep(2,7), rep(3,7), rep(4,7))), 
+         day_of_week = substr(weekdays(ymd(date)), 1, 2)) %>% 
+  ggplot(aes(x=date, y=count, group=week, color=week)) +
+  geom_point() +
+  geom_line() +
+  theme_tufte() +
+  geom_text(aes(label=day_of_week),hjust=0, vjust=0) +
+  theme(axis.title.x=element_blank(),
+        axis.text.x=element_blank(),
+        axis.ticks.x=element_blank(),
+        axis.title.y=element_blank()) +
+  labs(color="Week")
+```
+
+***
+
+#### Surge Analysis by day and hour
+
+* Surge Price **does not seem to be affected** by day of the week or the time of the day.
+* There are **3 blocks of day-time** which experienced unusual surge pricing. We might want to investigate this using more data:
+    * Monday, 4-5 am
+    * Thursday, 8-9 am
+    * Friday, 4-5 am
+    
+```{r}
+# plotting visual
+driver_rider_trips %>% 
+  mutate(hour = as.factor(hour(request_time)), 
+         day = factor(as.factor(weekdays(driver_rider_trips$request_time)), 
+               levels = c("Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"))) %>% 
+  group_by(hour, day) %>% 
+  summarise(mean_surge = mean(surge_multiplier)) %>% 
+  ggplot(aes(day, hour)) + 
+  geom_tile(aes(fill = mean_surge),colour = "white") + 
+  scale_fill_gradient(low = "white",high = "red") +
+  theme_tufte() +
+  theme(axis.title.x=element_blank(),
+        axis.title.y=element_blank()) +
+  labs(fill="Avg Surge")
+```
+
+***
+
+#### Surge Analysis by location
+
+Surge Pricing does not seem to be affected by start location.
+
+*Note: The visual includes trips with surge pricing > 1 only*
+
+```{r}
+# plotting visual
+ggplot(filter(driver_rider_trips, surge_multiplier>1) , aes(x=start_geo, y=surge_multiplier)) +
+  geom_boxplot(aes(colour = start_geo)) +
+  theme_tufte() +
+  theme(axis.title.x=element_blank(),
+        axis.ticks.x=element_blank(),
+        legend.position="none") +
+  ylab("Avg Surge")
+```
+
+***
+
+#### ETA & ATA Analysis by Hour and Location
+
+* **Blair Bend** seems to have much higher Expected and Actual time to arrival. 
+* ETA & ATA seem to **peek around 5:00 and 16:00**. It would be interesting to explore the reasons behind it using more data.
+* **ETA and ATA closely follow each other**. This is a positive sign as predictions for Actual Time to Arrival are quite accurate.
+
+```{r warning=FALSE, message=FALSE}
+# plotting visual
+ggplot(df2, aes(x=hour, y=median_estimated_time_to_arrival, group=start_geo, color=start_geo)) +
+  geom_point() +
+  geom_line() +
+  ylab("Median ETA") +
+  xlab("Hour") +
+  labs(color="Start Location") +
+  theme_tufte()
+```
+
+```{r warning=FALSE, message=FALSE}
+# plotting visual
+ggplot(df1, aes(x=hour, y=median_actual_time_to_arrival, group=start_geo, color=start_geo)) +
+  geom_point() +
+  geom_line() +
+  ylab("Median ATA") +
+  xlab("Hour") +
+  labs(color="Start Location") +
+  theme_tufte()
+```
+
+***
+
+#### Proportion of Ride Cancelled by Day and Hour
+
+* **1am - 7am** experiences the highest proportion of ride cancellations.
+* **15:00 - 18:00** also experience a slight increase in the proportion of cancelled rides.
+* Other than these times, the proportion of ride cancellations remain quite constant.
+* In the previous visual we saw that **ETA peaked around 5:00 & 16:00**. In this visual we're seeing **higher proportion of cancelled rides during these 2 time periods as well**. **Are these 2 related?** We will explore this in the next visual.
+
+```{r}
+# total trips by hour and day
+tot_trips <- 
+driver_rider_trips %>% 
+  mutate(hour = as.factor(hour(request_time)), 
+         day = factor(as.factor(weekdays(driver_rider_trips$request_time)), 
+               levels = c("Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"))) %>% 
+  group_by(hour, day) %>% 
+  summarise(tot_trips = n())
+
+# total cancelled trips by hour and day
+tot_cancelled_trips <-
+filter(driver_rider_trips, trip_status == "rider_canceled") %>% 
+  mutate(hour = as.factor(hour(request_time)), 
+         day = factor(as.factor(weekdays(filter(driver_rider_trips, trip_status == "rider_canceled")$request_time)), 
+               levels = c("Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"))) %>% 
+  group_by(hour, day) %>% 
+  summarise(tot_can_trips = n()) 
+
+# Joining above two tables to calculate proportion of cancelled rides. Plotting visual
+tot_trips %>% 
+  inner_join(tot_cancelled_trips, by = c('hour','day')) %>% 
+  mutate(proportion_cancelled = tot_can_trips/tot_trips) %>% 
+  ggplot(aes(day, hour)) + 
+  geom_tile(aes(fill = proportion_cancelled),colour = "white") + 
+  scale_fill_gradient(low = "white",high = "red") +
+  theme_tufte() +
+  theme(axis.title.x=element_blank(),
+        axis.title.y=element_blank()) +
+  labs(fill="% Rides Cancelled")
+```
+
+***
+
+#### ETA comparison of cancelled vs non-cancelled rides
+
+* **ETA and ride cancellation are indeed related**. Median ETA for cancelled rides are much higher than the median ETA for all the non-cancelled rides.
+* Again, the peak of median ETA for cancelled rides peak at around 5:00 and 16:00. This is **consistent with our previous observations**.
+
+```{r}
+# non-cancelled rides
+non_cancelled_rides <- 
+driver_rider_trips %>% 
+  filter(trip_status !="rider_canceled") %>% 
+  group_by(hour(request_time)) %>% 
+  summarize(median_estimated_time_to_arrival = median(estimated_time_to_arrival, na.rm = TRUE)) %>% 
+  select(hour = `hour(request_time)`, median_estimated_time_to_arrival)
+
+# cancelled rides  
+cancelled_rides <- 
+driver_rider_trips %>% 
+  filter(trip_status =="rider_canceled") %>% 
+  group_by(hour(request_time)) %>% 
+  summarize(median_estimated_time_to_arrival_canceled = median(estimated_time_to_arrival, na.rm = TRUE)) %>% 
+  select(hour = `hour(request_time)`, median_estimated_time_to_arrival_canceled)  
+
+# joining the above two dataframes
+all_rides <-
+  non_cancelled_rides %>% 
+  inner_join(cancelled_rides, by = c('hour')) %>% 
+  gather(variable, median_time, 2:3)
+
+# changing factor labels
+all_rides$variable <- factor(as.factor(all_rides$variable), labels = c("Not Cancelled", "Cancelled"))
+
+# plotting visual
+ggplot(all_rides, aes(x=hour, y=median_time, group=variable, color=variable)) +
+  geom_point() +
+  geom_line() +
+  ylab("Median ETA") +
+  xlab("Hour") +
+  labs(color=" ") +
+  theme_tufte()
+```
+
+***
+
+#### Rider Signups
+
+* Note: I am assuming that the **date of the first trip is when the rider first signed up on Uber**.
+* For **January, February and March** the Rider Signups in the year 2012 have been slightly lower as compared to 2011.
+* In **April, 2012**, there has been a huge spike in rider signups.
+* Uber promotional campaign was also started in April, 2012. **Promotional campaign might be driving increased rider signups**. However, we should investigate this relationship in detail before establishing causation.
+
+```{r}
+# plotting visual
+rider_data %>% 
+  filter(!is.na(first_completed_trip), year(first_completed_trip) >=2011) %>% 
+  mutate(month =month(first_completed_trip, label=TRUE),
+         year = as.factor(year(first_completed_trip))) %>% 
+  group_by(year, month) %>% 
+  summarise(rider_signup = n()) %>% 
+  filter(month %in% c('Jan', 'Feb', 'Mar', 'Apr')) %>% 
+  ggplot(aes(month, rider_signup)) +
+  geom_bar(stat = "identity", aes(fill = year), position = "dodge") +
+  scale_fill_manual(values=c("#999999", "#E69F00")) +
+  ylab(" ") +
+  xlab(" ") +
+  labs(fill="Year") +
+  theme_tufte()
+```
+
+
+### A/B Testing
+
+#### Finding test customers
+
+* Test customers are those customers who have redeemed the promotional coupon i.e. have **at least 1 trip with 10% off on the surge price.**
+* There are a total of **3348 trips** where the promotional coupon has been redeemed. All these rides are taken from Monday - Friday with Chelsea Court as the start location. 
+* There are a total of **3263 test customers** who have redeemed the promotional coupon
+
+```{r}
+# set of test customers i.e. customers that have redeemed the surge price promotional discount
+test_customer <- 
+driver_rider_trips %>% 
+  filter(trip_price_pre_discount > rider_payment) %>% 
+  select(rider_id) %>% 
+  unique() %>% 
+  .$rider_id
+
+# days_since_signup, lifetime_trips and lifetime_payments data for test customers (scaled)
+test_customer_data <-
+  rider_data %>% 
+  filter(rider_id %in% test_customer) %>% 
+  mutate(days_since_signup = -as.numeric(difftime(first_completed_trip, 
+                              max(rider_data$first_completed_trip, na.rm=TRUE), 
+                              units = c("days")))) %>%
+  select(days_since_signup, lifetime_trips, lifetime_payments) %>% 
+  scale()
+```
+
+***
+
+#### Finding control customers
+
+* **Potential control customers** are those customers who have not redeemed the promotional coupon. We have a total of **47075 potential control customers**.
+* **Control customers** are a set of **3263 customers** from these **47075 customers** which are very **similar in their behaviour to the test customers**.
+* Similarity in the behaviour is measured using the following metrics:
+    * **Days Since Signup** - Number of days since the customer has signed up on the Uber App. It is assummed that date of first completed trip is the date when the customer signs up.
+    * **LIfetime Trips** - Total trips taken by the customer till date.
+    * **Lifetime Payments** - Total payments made by the customer till date.
+* I have implemented a **K-Nearest Neighbour Algorithm** to perform test-control matching. The algorithm performs the following steps:
+    * Calculates the **distance** of each **test customer (3263 in total)** from each **potential control customer (47075 in total)**
+    * Note: The distance is a measure of proximity of customers based on the three measure we defined above.
+    * For each test **customer (3263 in total)**, the algorithm chooses the **closest control customer** based on the distance.
+    * Finally we have a set of **3263 test customers** and a set of **3263 control customers**.
+* The data below represents the set of **3263 matched customers** and their respective metrics.
+
+```{r}
+# days_since_signup, lifetime_trips and lifetime_payments data for potential control customers (scaled)
+control_customer_data <-
+  rider_data %>% 
+  filter(!rider_id %in% test_customer) %>% 
+  mutate(days_since_signup = -as.numeric(difftime(first_completed_trip, 
+                              max(rider_data$first_completed_trip, na.rm=TRUE), 
+                              units = c("days")))) %>%
+  na.omit() %>% 
+  select(days_since_signup, lifetime_trips, lifetime_payments) %>% 
+  scale()
+
+# converting to matrix format
+data <- as.matrix(control_customer_data)
+query <- as.matrix(test_customer_data)
+
+# query - test data-set
+# data - control data-set
+# k=1, closest customer
+
+# running KNN algorithm which outputs the nearest neighbour index
+nearest_neighbour <- knnx.index(data, query, k=1, algo="kd_tree")
+
+# non-scaled test customer data
+test_customer_data <-
+  rider_data %>% 
+  filter(rider_id %in% test_customer) %>% 
+  mutate(days_since_signup = -as.numeric(difftime(first_completed_trip
+                                                   , max(rider_data$first_completed_trip
+                                                         , na.rm=TRUE) , units = c("days")))) 
+
+# adding prefix 'test'
+colnames(test_customer_data) <- paste("test", colnames(test_customer_data), sep = "_")
+
+# non-scaled potential control customer data
+control_customer_data <-
+  rider_data %>% 
+  filter(!rider_id %in% test_customer) %>% 
+  na.omit() %>% 
+  mutate(days_since_signup = -as.numeric(difftime(first_completed_trip
+                                                   , max(rider_data$first_completed_trip
+                                                         , na.rm=TRUE) , units = c("days")))) 
+# adding prefix 'control'
+colnames(control_customer_data) <- paste("control", colnames(control_customer_data), sep = "_")
+
+# binding the two dataframes on matched index
+test_control_data <- 
+  bind_cols(test_customer_data, control_customer_data[nearest_neighbour,]) %>% 
+  select(test_rider_id, control_rider_id,
+         test_days_since_signup, control_days_since_signup,
+         test_lifetime_trips, control_lifetime_trips,
+         test_lifetime_payments, control_lifetime_payments)
+
+# printing test-control matched dataset
+kable(arrange(test_control_data, desc(control_lifetime_payments))) %>% 
+  kable_styling(bootstrap_options = c("striped", "hover", "responsive")) %>% 
+  scroll_box(width = "100%", height = "500px")
+```
+
+***
+
+#### Statistical Significance of Test-Control Matching
+
+Before proceeding with the A/B test, we would like to verify whether the test and control groups are statistically similar to each other or not. For doing the same we would run three separate t-tests:
+
+1. Similarity of **days since signup**
+    * H0: The mean days since signup of both the groups are the same
+    * HA: The mean days since signup of both the groups are not the same
+    * Mean Test: 868.8162 | Mean Control: 869.5676
+    * **p-value = 0.9504** | **Confidence Level: 95%**
+    * Thus, we fail to reject H0 i.e. **mean days since signup for both the groups are the same**.
+2. Similarity of **lifetime payments**
+    * H0: The mean lifetime payments of both the groups are the same
+    * HA: The mean lifetime payments of both the groups are not the same
+    * Mean Test: 2720.244 | Mean Control: 2686.740
+    * **p-value = 0.7112** | **Confidence Level: 95%**
+    * Thus, we fail to reject H0 i.e. **mean lifetime payments for both the groups are the same**.
+3. Similarity of **lifetime trips**
+    * H0: The mean lifetime trips of both the groups are the same
+    * HA: The mean lifetime trips of both the groups are not the same
+    * Mean Test: 266.7312 | Mean Control: 243.6641 
+    * **p-value = 0.002051** | **Confidence Level: 95%**
+    * Thus, we reject H0 i.e. **mean lifetime trips for both the groups are not the same**.
+    * Although the groups are statistically dissimilar, we would assume practical significance in this case.
+
+```{r results=FALSE}
+# t-test for days since signup
+t.test(test_control_data$test_days_since_signup,test_control_data$control_days_since_signup, conf.level = 0.95)
+
+# t-test for lifetime trips
+t.test(test_control_data$test_lifetime_trips,test_control_data$control_lifetime_trips, conf.level = 0.95)
+
+# t-test for lifetime payments
+t.test(test_control_data$test_lifetime_payments,test_control_data$control_lifetime_payments, conf.level = 0.95)
+```
+
+***
+
+#### A/B Testing
+
+* **Control customers** have taken a total of **3746 trips**, whereas the **test customers** have taken a total of **4200 trips**. Hence the promotional campaign has led to an increase of **454 trips**.
+* The total revenue generated through control customers is **$27k**, total revenue generated through test customers is **$35k**. Hence the promotional campaign has led to an increase in revenue of approximately **$8,000**.
+* There are **3 key metrics** on which we would evaluate the success of this campaign in terms on **engagement**:
+    1. **Avg Revenue Per Customer**
+        * H0: The mean revenue per customer of both the groups are the same
+        * HA: The mean revenue per customer of both the groups are not the same
+        * Mean Test: 10.06 | Mean Control: 8.38
+        * **p-value < 2.2e-16** | **Confidence Level: 95%**
+        * Thus, we reject H0 i.e. **mean revenue per customer for both the groups are not the same**.
+        * **Also, we are 95% confident that the mean revenue per customer for test customers are higher by $2.23 to $2.97**
+    2. **Avg Trip Per Customer**
+        * H0: The avg trip per customer of both the groups are the same
+        * HA: The avg trip per customer of both the groups are not the same
+        * Mean Test: 1.29 | Mean Control: 1.15
+        * **p-value < 2.2e-16** | **Confidence Level: 95%**
+        * Thus, we reject H0 i.e. **average trip per customer for both the groups are not the same**.
+        * **Also, we are 95% confident that the average trip per customer for test customers are higher by 0.11 to 0.17**
+    3. **Proportion Rides Cancelled**
+        * H0: The proportion of rides cancelled for both the groups are the same
+        * HA: The proportion of rides cancelled for both the groups are not the same
+        * Mean Test: 4.4% | Mean Control: 9.5%
+        * **p-value < 2.2e-16** | **Confidence Level: 95%**
+        * Thus, we reject H0 i.e. **proportion of rides cancelled for both the groups are not the same**.
+        * **Also, we are 95% confident that the proportion of rides cancelled by target customers are 4.1% - 6.3% lower**
+        * **Interesting Observation**: Even though the Mean ETA of test customers is higher, the proportion of ride cancellation is lower. This might indicate that **by offering discounts we are gaining loyalty of customers**. The same customers are now willing to wait for a longer time.
+        
+*Note: The total trips and total revenue for control customers has been extrapolated.
+
+```{r}
+# test and control customer ids
+test_customer <- test_control_data$test_rider_id
+control_customer <- test_control_data$control_rider_id 
+
+# adding a new variable that signifies the type of customer: test, control or other
+driver_rider_trips$customer_type <- ifelse(driver_rider_trips$rider_id %in% test_customer, "test",
+                                           ifelse(driver_rider_trips$rider_id %in% control_customer, "control", "other"))
+
+# table comparing test and control customers on various metrics
+df_a_b <-
+driver_rider_trips %>% 
+  filter(customer_type %in% c('test', 'control')) %>% 
+  mutate(cancelled_flag = ifelse(trip_status == 'rider_canceled', 1, 0)) %>% 
+  group_by(customer_type) %>% 
+  summarise(total_trips = n(),
+            total_revenue = sum(trip_price_pre_discount),
+            revenue_per_customer = total_revenue/n_distinct(rider_id),
+            avg_trip_per_customer = total_trips/n_distinct(rider_id),
+            proportion_cancelled = mean(cancelled_flag),
+            mean_eta = mean(estimated_time_to_arrival, na.rm=TRUE))
+
+# extrpolating trips and revenue values for control customers
+df_a_b$total_trips[1] <- round(3155*3263/2748,0)
+df_a_b$total_revenue[1] <- round(23017.53*3263/2748,0)
+
+# t-test for avg revenue per customer
+x1 <- driver_rider_trips %>% filter(customer_type == "test") %>% 
+  group_by(rider_id) %>% summarise(total_revenue = sum(rider_payment)) %>% .$total_revenue
+x2 <- driver_rider_trips %>% filter(customer_type == "control") %>% 
+  group_by(rider_id) %>% summarise(total_revenue = sum(rider_payment)) %>% .$total_revenue
+# t.test(x1,x2, conf.level = 0.95)
+
+# t-test for avg trip per customer
+x1 <- driver_rider_trips %>% filter(customer_type == "test") %>% 
+  group_by(rider_id) %>% summarise(total_trips = n()) %>% .$total_trips
+x2 <- driver_rider_trips %>% filter(customer_type == "control") %>% 
+  group_by(rider_id) %>% summarise(total_trips = n()) %>% .$total_trips
+# t.test(x1,x2, conf.level = 0.95)
+
+# t-test for proportion cancelled
+x1 <- driver_rider_trips %>% filter(customer_type == "test") %>% 
+  mutate(cancelled_flag = ifelse(trip_status == 'rider_canceled', 1, 0)) %>% .$cancelled_flag
+x2 <- driver_rider_trips %>% filter(customer_type == "control") %>% 
+  mutate(cancelled_flag = ifelse(trip_status == 'rider_canceled', 1, 0)) %>% .$cancelled_flag
+# t.test(x1,x2, conf.level = 0.95)
+
+# printing data set
+ df_a_b %>% 
+  kable() %>% 
+  kable_styling(bootstrap_options = c("striped", "hover", "responsive")) %>% 
+  scroll_box(width = "100%", height = "175px")
+```
+
+***
+
+#### Financial Analysis
+
+* The total **discount cost incurred is approximately $3,000**.
+* The total **revenue increase due to the promotional campaign is approximately $8,000**.
+* Thus, the promotional campaign has led to a **profit of approximately $5,000**.
+* Note: I am assuming that the cost of marketing, designing and sending the promotional coupons is zero.
+
+## 3. Summary & Recommendations
+
+#### Summary
+
+1. **Participation Rate**: The total participation rate of the campaign was 6.4%. Participation rate means the percentage of riders who used the discount coupon out of the all the riders who were targeted. *I have assumed all the riders in our dataset were sent an email about the promotional campaign*. 
+2. **Rider Signups**: Approximately 1000 more riders signed up in April, 2012 as compared to April, 2011. It is hard to establish causation between the promotional campaign and the increased rider signups, however, there seems to be some association. *I have assumed that the date of first completed trip is when the rider signs up on Uber*.
+3. **Revenue Per Customer**: We are 95% confident that the targeted customers exibhit an increased revenue of $2.23 - $2.97 on an average.
+4. **Trips Per Customer**: We are 95% confident that the targeted customers take 0.11 - 0.17 more trips on an average.
+5. **Proportion of rides cancelled**: We are 95% confident that the targeted customers cancel 4.1 - 6.3% lesser rides.
+6. **Financial Profit**: The promotional campaign led to a profit of approximately $5,000.
+
+***
+
+#### Recommendations
+
+1. **Should we run the campaign in the future?** It is evident that the current promotional campaign not only leads to a financial profit, but it also leads to an increased customer engagement. The targeted customers take more trips, spend more money on any given trip, cancel lower number of rides and are willing to wait for a longer time. It is quite possible that by running more campaigns like these, we might be able to convert these customers into loyal customers. Loyal customers would eventually lead to even more financial benefits. Thus, my recommendation would be to continue with such promotional campaigns in the future.
+2. I would suggest some **modifications to the current design of the promotional campaign**:
+    * **Sending promotions via multiple sources**: It is possible that customers might not regularly check their emails. If we want to increase the campaign participation rate, we can send the promotions via Uber App, push-notifications, phone messages, direct mailers, social media platforms etc. We could also perform A/B testing to check which platform leads to the highest participation rate.
+    * **Sending promotions on Saturday**: We know that the maximum trips are undertaken on Saturday. If our focus is to increase customer engagement, we might want to run campaigns on Saturday's as well. We also know that Monday witnesses the lowest demand and so we can swap Monday with Saturday.
+    * **Selecting customers who receive discount**: Depending upon the objective of the promotional campaign, the targeted customers should be carefully selected. Ex: If the objective is to re-engage customers, then those customers should be targeted who haven't shown much activity in the last 13 weeks. 
+    * **Selecting control customers before running the campaign**: Ideally a set of control customers must be identified even before a campaign is run. We can match the test and control customers based on their past behaviour say 13 weeks prior to the campaign.
+    * **Decrease percentage off**: We might want to test how decreasing the percentage off effects customer engagement. If the effect is minimal then we can give a lower percentage off, say 5%.
+
+## 4. Future Work
+
+1. **Long Term Value Analysis**: We might want to investigate the behaviour of targeted customer in the post campaign period. In an ideal situation the targeted customers should show increased engagement even when the promotions are not offered. This would basically mean that promotions have been successful in converting them into loyal customers.
+2. **Week-on-week trip fluctuation analysis**: We saw previously that the ride demand fluctuated quite a bit from week to week. We might want to check if there is some sort of weekly trend. If yes, then we can use it to offer better promotions, adjust trip prices and plan the driver supply hours accordingly.
+3. **Outlier Analysis**: We observed that many variables were right skewed and the top 1% values might be potential outliers. These top 1% values need be thoroughly investigated before removing them.
+4. **Unusual surge pricing**: We observed unsually high surge pricing on Monday (4-5 am), Thursday (8-9 am) and Friday, 4-5 am. We might want to investigate the reasons behind this issue.
+5. **ETA peaking at 5:00 and 16:00**: A thorough analysis needs to be done regarding unusually high ETA during these two periods.
+6. **Low Driver Ratings**: There are only 1% drivers with ratings less than 4.39. We might want to investigate drivers having ratings less than 4. 
+7. **Reducing ETA**: We saw a strong assocation between ETA and ride cancellation. It might be prudent to build strategies that would help reduce ETA. This would lead to a lower number of rides being cancelled.
+
